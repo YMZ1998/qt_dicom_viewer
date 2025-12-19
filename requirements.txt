@@ -1,0 +1,8 @@
+PyQt5>=5.15
+pydicom>=2.5
+SimpleITK>=2.2
+numpy>=1.23
+matplotlib>=3.6
+pytest>=7.0
+shapely>=2.0
+nibabel>=4.0
