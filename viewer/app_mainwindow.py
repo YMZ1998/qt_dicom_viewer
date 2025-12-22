@@ -7,19 +7,45 @@ import os
 from PyQt5.QtWidgets import (
     QMainWindow, QFileDialog, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QPushButton, QLabel, QSlider, QListWidgetItem, QAction, QMenuBar,
-    QComboBox, QDoubleSpinBox, QGroupBox, QCheckBox
+    QComboBox, QDoubleSpinBox, QGroupBox, QCheckBox, QProgressDialog, QStatusBar,
+    QToolBar, QMessageBox, QShortcut
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtGui import QKeySequence
 from .dicom_io import group_dicom_series, read_series_as_volume, get_rescale_from_file, apply_rescale
 from .image_view import ImageView
 from .rtstruct import parse_rtstruct, contours_to_slice_masks
 
 
+class SeriesLoaderThread(QThread):
+    """Background thread for loading DICOM series"""
+    finished = pyqtSignal(object, object, object, object, float, float)
+    error = pyqtSignal(str)
+    
+    def __init__(self, files):
+        super().__init__()
+        self.files = files
+    
+    def run(self):
+        try:
+            vol, origin, spacing, direction = read_series_as_volume(self.files)
+            try:
+                slope, intercept = get_rescale_from_file(self.files[0])
+            except Exception:
+                slope, intercept = 1.0, 0.0
+            vol = apply_rescale(vol, slope=slope, intercept=intercept)
+            self.finished.emit(vol, origin, spacing, direction, slope, intercept)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('qt_dicom_viewer_demo')
-        self.resize(1100, 700)
+        self.setWindowTitle('DICOM Viewer - Advanced Medical Imaging')
+        self.resize(1400, 800)
+        self.current_theme = 'dark'
+        self._apply_stylesheet()
         self._build_ui()
         self.volume = None  # shape (z,y,x)
         self.origin = None
@@ -32,10 +58,71 @@ class MainWindow(QMainWindow):
         self.rtstruct_files = []  # list of available RTSTRUCT files
         self.current_rtstruct_index = 0  # current RTSTRUCT index
         self.display_mode = 'both'  # 'fill', 'contour', or 'both'
-        self.contour_width = 2.0
-        self.alpha_value = 0.4
-
+        self.contour_width = 1.0
+        self.alpha_value = 0.0
+        self.image_cache = {}
+        self.update_timer = QTimer()
+        self.update_timer.setSingleShot(True)
+        self.update_timer.timeout.connect(self._delayed_update)
+        self.pending_update = False
+        self.loader_thread = None
+        self._setup_shortcuts()
+    
+    def _setup_shortcuts(self):
+        """Setup keyboard shortcuts"""
+        QShortcut(QKeySequence(Qt.Key_PageUp), self, lambda: self.on_wheel_slice(5))
+        QShortcut(QKeySequence(Qt.Key_PageDown), self, lambda: self.on_wheel_slice(-5))
+        QShortcut(QKeySequence(Qt.Key_Up), self, lambda: self.on_wheel_slice(1))
+        QShortcut(QKeySequence(Qt.Key_Down), self, lambda: self.on_wheel_slice(-1))
+        QShortcut(QKeySequence(Qt.Key_Home), self, self.goto_first_slice)
+        QShortcut(QKeySequence(Qt.Key_End), self, self.goto_last_slice)
+        QShortcut(QKeySequence(Qt.Key_Space), self, self.toggle_all_rois)
+    
+    def goto_first_slice(self):
+        if self.volume is not None:
+            self.slice_index = 0
+            self.slider.setValue(self.slice_index)
+    
+    def goto_last_slice(self):
+        if self.volume is not None:
+            self.slice_index = self.volume.shape[0] - 1
+            self.slider.setValue(self.slice_index)
+    
+    def toggle_all_rois(self):
+        if self.roi_list.count() == 0:
+            return
+        any_checked = any(
+            self.roi_list.item(i).checkState() == Qt.Checked 
+            for i in range(self.roi_list.count())
+        )
+        new_state = Qt.Unchecked if any_checked else Qt.Checked
+        for i in range(self.roi_list.count()):
+            self.roi_list.item(i).setCheckState(new_state)
+        self.update_viewer()
+    
+    def _apply_stylesheet(self):
+        """Apply dark theme stylesheet"""
+        self.setStyleSheet("""
+        QMainWindow { background-color: #2b2b2b; }
+        QWidget { background-color: #2b2b2b; color: #e0e0e0; }
+        QPushButton { background-color: #3c3c3c; border: 1px solid #555; border-radius: 4px; padding: 6px 12px; }
+        QPushButton:hover { background-color: #4a4a4a; }
+        QListWidget { background-color: #353535; border: 1px solid #555; }
+        QListWidget::item:selected { background-color: #0d47a1; }
+        QSlider::groove:horizontal { border: 1px solid #555; height: 8px; background: #3c3c3c; }
+        QSlider::handle:horizontal { background: #0d47a1; width: 16px; margin: -4px 0; border-radius: 8px; }
+        QGroupBox { border: 1px solid #555; border-radius: 4px; margin-top: 8px; padding-top: 12px; }
+        QToolBar { background-color: #353535; border: none; }
+        QStatusBar { background-color: #353535; border-top: 1px solid #555; }
+        """)
+    
     def _build_ui(self):
+        # Status bar and toolbar
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        self.status_bar.showMessage('Ready')
+        self._build_toolbar()
+        
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
@@ -128,7 +215,7 @@ class MainWindow(QMainWindow):
         self.width_spin.setMinimum(0.5)
         self.width_spin.setMaximum(10.0)
         self.width_spin.setSingleStep(0.5)
-        self.width_spin.setValue(2.0)
+        self.width_spin.setValue(1.0)
         self.width_spin.valueChanged.connect(self.on_contour_width_changed)
         display_layout.addWidget(self.width_spin)
         
@@ -138,7 +225,7 @@ class MainWindow(QMainWindow):
         self.alpha_spin.setMinimum(0.0)
         self.alpha_spin.setMaximum(1.0)
         self.alpha_spin.setSingleStep(0.1)
-        self.alpha_spin.setValue(0.4)
+        self.alpha_spin.setValue(0.0)
         self.alpha_spin.valueChanged.connect(self.on_alpha_changed)
         display_layout.addWidget(self.alpha_spin)
         
@@ -157,6 +244,87 @@ class MainWindow(QMainWindow):
         load_rt_action.triggered.connect(self.load_rt)
         file_menu.addAction(load_rt_action)
         self.setMenuBar(menu)
+    
+    def _build_toolbar(self):
+        """Build main toolbar"""
+        toolbar = QToolBar('Main Toolbar')
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+        
+        open_action = QAction('Open', self)
+        open_action.triggered.connect(self.open_folder)
+        toolbar.addAction(open_action)
+        
+        load_rt_action = QAction('Load RT', self)
+        load_rt_action.triggered.connect(self.load_rt)
+        toolbar.addAction(load_rt_action)
+        
+        toolbar.addSeparator()
+        
+        # Window/Level controls
+        window_label = QLabel(' Window: ')
+        toolbar.addWidget(window_label)
+        self.window_spin = QDoubleSpinBox()
+        self.window_spin.setMinimum(1.0)
+        self.window_spin.setMaximum(10000.0)
+        self.window_spin.setValue(400.0)
+        self.window_spin.setMaximumWidth(100)
+        self.window_spin.valueChanged.connect(self.on_window_changed)
+        toolbar.addWidget(self.window_spin)
+        
+        level_label = QLabel(' Level: ')
+        toolbar.addWidget(level_label)
+        self.level_spin = QDoubleSpinBox()
+        self.level_spin.setMinimum(-10000.0)
+        self.level_spin.setMaximum(10000.0)
+        self.level_spin.setValue(40.0)
+        self.level_spin.setMaximumWidth(100)
+        self.level_spin.valueChanged.connect(self.on_level_changed)
+        toolbar.addWidget(self.level_spin)
+        
+        toolbar.addSeparator()
+        
+        # Theme toggle
+        self.theme_btn = QPushButton('☀ Light')
+        self.theme_btn.clicked.connect(self.toggle_theme)
+        toolbar.addWidget(self.theme_btn)
+    
+    def on_window_changed(self, value):
+        if self.volume is not None and self.viewer.current_image is not None:
+            self.viewer.window = value
+            self.image_cache.clear()
+            self.update_viewer()
+    
+    def on_level_changed(self, value):
+        if self.volume is not None and self.viewer.current_image is not None:
+            self.viewer.level = value
+            self.image_cache.clear()
+            self.update_viewer()
+    
+    def toggle_theme(self):
+        if self.current_theme == 'dark':
+            self.current_theme = 'light'
+            self._apply_light_theme()
+            self.theme_btn.setText('🌙 Dark')
+        else:
+            self.current_theme = 'dark'
+            self._apply_stylesheet()
+            self.theme_btn.setText('☀ Light')
+    
+    def _apply_light_theme(self):
+        self.setStyleSheet("""
+        QMainWindow { background-color: #f5f5f5; }
+        QWidget { background-color: #f5f5f5; color: #212121; }
+        QPushButton { background-color: #fff; border: 1px solid #bdbdbd; border-radius: 4px; padding: 6px 12px; }
+        QPushButton:hover { background-color: #e3f2fd; }
+        QListWidget { background-color: #fff; border: 1px solid #bdbdbd; }
+        QListWidget::item:selected { background-color: #2196f3; color: #fff; }
+        QSlider::groove:horizontal { border: 1px solid #bdbdbd; height: 8px; background: #e0e0e0; }
+        QSlider::handle:horizontal { background: #2196f3; width: 16px; margin: -4px 0; border-radius: 8px; }
+        QGroupBox { border: 1px solid #bdbdbd; border-radius: 4px; margin-top: 8px; padding-top: 12px; }
+        QToolBar { background-color: #fafafa; border: none; }
+        QStatusBar { background-color: #fafafa; border-top: 1px solid #bdbdbd; }
+        """)
 
     def open_folder(self):
         folder = QFileDialog.getExistingDirectory(self, 'Open DICOM Folder', os.getcwd())
@@ -203,14 +371,22 @@ class MainWindow(QMainWindow):
             self.info_label.setText(f'Failed to load series: {e}')
 
     def update_viewer(self):
+        """Schedule a delayed update"""
+        if not self.pending_update:
+            self.pending_update = True
+            self.update_timer.start(50)
+    
+    def _delayed_update(self):
+        """Actual viewer update implementation"""
+        self.pending_update = False
         if self.volume is None:
             return
         z, y, x = self.volume.shape
         if self.slice_index < 0: self.slice_index = 0
         if self.slice_index >= z: self.slice_index = z - 1
+        
         img2d = self.volume[self.slice_index]
         self.viewer.clear_overlays()
-        # compose overlays from selected ROIs
         overlays = []
         for i in range(self.roi_list.count()):
             item = self.roi_list.item(i)
@@ -219,13 +395,21 @@ class MainWindow(QMainWindow):
                 per_slice = self.roi_masks.get(roi_name, {})
                 mask = per_slice.get(self.slice_index, None)
                 if mask is not None:
-                    # choose color from a simple hash
                     color = self._color_for_name(roi_name)
                     overlays.append((mask, color, self.alpha_value, self.display_mode, self.contour_width))
         self.viewer.set_overlays(overlays)
-        # display
         self.viewer.display_image(img2d)
-        self.slice_label.setText(f'Slice: {self.slice_index+1} / {self.volume.shape[0]}')
+        self.slice_label.setText(f'Slice: {self.slice_index+1} / {z}')
+        
+        # Update W/L spinboxes
+        if self.viewer.window is not None:
+            self.window_spin.blockSignals(True)
+            self.window_spin.setValue(self.viewer.window)
+            self.window_spin.blockSignals(False)
+        if self.viewer.level is not None:
+            self.level_spin.blockSignals(True)
+            self.level_spin.setValue(self.viewer.level)
+            self.level_spin.blockSignals(False)
 
     def on_slider_changed(self, val):
         self.slice_index = int(val)

@@ -28,7 +28,13 @@ class ImageView(QGraphicsView):
         self.contour_items = []  # list of QGraphicsPathItem for contours
         # enable high quality transforms
         self.setRenderHints(self.renderHints() | Qt.SmoothTransformation)
+        
+        # Window/Level adjustment
+        self.wl_adjust_mode = False
+        self.last_mouse_pos = None
+        self.wl_sensitivity = 2.0
         self.cached_rgba = None  # cached RGBA image
+        self.first_image_loaded = False  # Track if first image has been displayed
         
         # Window/Level adjustment
         self.wl_adjust_mode = False
@@ -38,22 +44,32 @@ class ImageView(QGraphicsView):
     def display_image(self, img2d, window=None, level=None):
         """
         img2d: 2D numpy array (y,x)
-        window/level optional; if None, auto compute
+        window/level: if provided, update values; otherwise keep existing
         """
         self.current_image = img2d.astype(float)
-        if window is None or level is None:
-            amin, amax = np.min(self.current_image), np.max(self.current_image)
-            window = amax - amin if amax != amin else 1.0
-            level = (amax + amin) / 2.0
-        self.window = float(window)
-        self.level = float(level)
+        
+        # Only auto-compute on first load (when window/level are None)
+        if self.window is None or self.level is None:
+            if window is None or level is None:
+                # First time, compute from image
+                amin, amax = np.min(self.current_image), np.max(self.current_image)
+                window = amax - amin if amax != amin else 1.0
+                level = (amax + amin) / 2.0
+            self.window = float(window)
+            self.level = float(level)
+        # If window/level already set, keep them (don't auto-update)
+        
         rgba = self._compose_rgba()
         self.cached_rgba = rgba.copy()  # Cache the RGBA
         qimg = QImage(rgba.data, rgba.shape[1], rgba.shape[0], rgba.strides[0], QImage.Format_RGBA8888)
         self.pix_item.setPixmap(QPixmap.fromImage(qimg))
         self.setSceneRect(0, 0, rgba.shape[1], rgba.shape[0])
         self._draw_contours()
-        self.fitInView(self.pix_item, Qt.KeepAspectRatio)
+        
+        # Auto-fit only on first image load
+        if not self.first_image_loaded:
+            self.fitInView(self.pix_item, Qt.KeepAspectRatio)
+            self.first_image_loaded = True
     
     def set_cached_rgba(self, rgba):
         """Set cached RGBA data"""
