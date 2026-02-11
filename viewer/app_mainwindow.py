@@ -11,6 +11,7 @@ from PyQt5.QtGui import QKeySequence
 from .dicom_io import group_dicom_series, read_series_as_volume, get_rescale_from_file, apply_rescale
 from .image_view import ImageView
 from .rtstruct import parse_rtstruct, contours_to_slice_masks
+from .rtss_split_dialog import RTSSSplitDialog
 
 
 class SeriesLoaderThread(QThread):
@@ -120,9 +121,6 @@ class MainWindow(QMainWindow):
         main_layout = QHBoxLayout(central)
         left_w = QWidget()
         left = QVBoxLayout(left_w)
-        self.open_btn = QPushButton('Open DICOM Folder')
-        self.open_btn.clicked.connect(self.open_folder)
-        left.addWidget(self.open_btn)
         left.addWidget(QLabel('Series:'))
         self.series_list = QListWidget()
         self.series_list.itemClicked.connect(self.on_series_selected)
@@ -154,9 +152,6 @@ class MainWindow(QMainWindow):
         right.addWidget(self.info_label)
         rt_group = QGroupBox('RTStruct')
         rt_layout = QVBoxLayout()
-        self.load_rt_btn = QPushButton('Load RTSTRUCT')
-        self.load_rt_btn.clicked.connect(self.load_rt)
-        rt_layout.addWidget(self.load_rt_btn)
         rt_selector_layout = QHBoxLayout()
         self.rt_prev_btn = QPushButton('<')
         self.rt_prev_btn.setMaximumWidth(40)
@@ -211,9 +206,15 @@ class MainWindow(QMainWindow):
         open_action = QAction('Open DICOM Folder', self)
         open_action.triggered.connect(self.open_folder)
         file_menu.addAction(open_action)
-        load_rt_action = QAction('Load RTSTRUCT', self)
-        load_rt_action.triggered.connect(self.load_rt)
-        file_menu.addAction(load_rt_action)
+        # load_rt_action = QAction('Load RTSTRUCT', self)
+        # load_rt_action.triggered.connect(self.load_rt)
+        # file_menu.addAction(load_rt_action)
+        
+        file_menu.addSeparator()
+        split_rtss_action = QAction('RTSS Split', self)
+        split_rtss_action.triggered.connect(self.open_rtss_split_dialog)
+        file_menu.addAction(split_rtss_action)
+        
         self.setMenuBar(menu)
     
     def _build_toolbar(self):
@@ -225,9 +226,13 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self.open_folder)
         toolbar.addAction(open_action)
         
-        load_rt_action = QAction('Load RT', self)
-        load_rt_action.triggered.connect(self.load_rt)
-        toolbar.addAction(load_rt_action)
+        # load_rt_action = QAction('Load RT', self)
+        # load_rt_action.triggered.connect(self.load_rt)
+        # toolbar.addAction(load_rt_action)
+        
+        split_rtss_action = QAction('Split RTSS', self)
+        split_rtss_action.triggered.connect(self.open_rtss_split_dialog)
+        toolbar.addAction(split_rtss_action)
         
         toolbar.addSeparator()
         window_label = QLabel(' Window: ')
@@ -396,6 +401,13 @@ class MainWindow(QMainWindow):
                 item.setCheckState(Qt.Checked)
                 self.roi_list.addItem(item)
             self.update_viewer()
+            
+            # 保存RTSS信息供分割功能使用
+            self.current_rtstruct_path = path
+            self.current_rtstruct_name = os.path.basename(path)
+            # 缓存ROI数据用于分割
+            self.rtss_rois_cache = self._convert_rois_for_split(rois)
+            
             self.info_label.setText(f'Loaded RTSTRUCT: {len(masks)} ROIs')
         except Exception as e:
             self.info_label.setText(f'Failed to load RTSTRUCT: {e}')
@@ -463,6 +475,13 @@ class MainWindow(QMainWindow):
             current_text = self.info_label.text()
             rt_filename = os.path.basename(rt_file)
             self.info_label.setText(f'{current_text}\nRTStruct: {rt_filename} ({len(masks)} ROIs)')
+            
+            # 保存RTSS信息供分割功能使用
+            self.current_rtstruct_path = rt_file
+            self.current_rtstruct_name = rt_filename
+            # 缓存ROI数据用于分割
+            self.rtss_rois_cache = self._convert_rois_for_split(rois)
+            
         except Exception as e:
             self.info_label.setText(f'{self.info_label.text()}\nFailed to load RTStruct: {e}')
     
@@ -488,9 +507,80 @@ class MainWindow(QMainWindow):
             self.current_rtstruct_index += 1
             self._load_rtstruct_by_index(self.current_rtstruct_index)
             self._update_rtstruct_controls()
+    
+    def open_rtss_split_dialog(self):
+        """打开RTSS分割对话框"""
+        # 准备RTSS数据
+        rtss_data = None
+        if hasattr(self, 'current_rtstruct_path') and self.current_rtstruct_path:
+            # 如果直接存储了路径，需要重新解析
+            try:
+                from .rtss_split_non_overlap import load_rois_from_rtss
+                rois = load_rois_from_rtss(self.current_rtstruct_path, z_tol=1e-3)
+                rtss_data = {
+                    "filename": os.path.basename(self.current_rtstruct_path),
+                    "rois": rois
+                }
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"无法加载RTSS数据: {e}")
+                return
+        elif hasattr(self, 'rtss_rois_cache') and self.rtss_rois_cache:
+            # 如果有缓存的ROI数据
+            rtss_data = {
+                "filename": getattr(self, 'current_rtstruct_name', 'Unknown'),
+                "rois": self.rtss_rois_cache
+            }
+        else:
+            QMessageBox.information(self, "提示", "请先加载RTSTRUCT文件")
+            return
+        
+        dialog = RTSSSplitDialog(self, rtss_data)
+        dialog.show()
 
     def _color_for_name(self, name):
         h = sum(ord(c) for c in name) % 360
         import colorsys
         r, g, b = colorsys.hsv_to_rgb(h/360.0, 0.8, 0.9)
         return (int(r*255), int(g*255), int(b*255))
+    
+    def _convert_rois_for_split(self, rois_dict):
+        """将主窗口的ROI数据格式转换为分割算法需要的格式"""
+        from .rtss_split_non_overlap import ROI
+        import numpy as np
+        converted_rois = []
+        
+        # rois_dict格式: {name: [contour_data_array, ...]}
+        # 每个contour_data_array是Nx3的数组 (x,y,z坐标)
+        roi_counter = 1
+        for name, contours in rois_dict.items():
+            roi = ROI(roi_counter, name)
+            roi_counter += 1
+            
+            # 处理每个轮廓
+            for contour_data in contours:
+                if len(contour_data) == 0:
+                    continue
+                
+                # contour_data是Nx3数组
+                try:
+                    data = np.array(contour_data, dtype=float)
+                    if data.shape[1] != 3:
+                        continue
+                    
+                    # 处理 z 浮点误差 (与分割算法保持一致)
+                    z = float(np.mean(data[:, 2]))
+                    z_tol = 1e-3
+                    z = round(z / z_tol) * z_tol
+                    
+                    # 提取xy坐标
+                    xy = [(float(x), float(y)) for x, y in data[:, :2]]
+                    roi.add_polygon(z, xy)
+                except Exception as e:
+                    print(f"[WARNING] 处理ROI {name} 的轮廓时出错: {e}")
+                    continue
+            
+            # 只添加有有效切片的ROI
+            if len(roi.slices) > 0:
+                converted_rois.append(roi)
+        
+        return converted_rois
