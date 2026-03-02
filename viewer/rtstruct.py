@@ -2,7 +2,7 @@
 import numpy as np
 import pydicom
 from matplotlib.path import Path
-from .utils import patient_to_index
+from .utils import patient_points_to_indices
 
 
 def parse_rtstruct(path):
@@ -32,18 +32,16 @@ def contours_to_slice_masks(rois, origin, spacing, direction, volume_shape):
     for roi_name, contours in rois.items():
         per_slice = {}
         for contour in contours:
-            idxs = np.array([patient_to_index(pt, origin, spacing, direction) for pt in contour])
-            k_vals = idxs[:, 2]
-            ks = np.unique(np.round(k_vals).astype(int))
-            for k in ks:
-                if k < 0 or k >= zcount:
-                    continue
-                poly_xy = idxs[:, :2]
-                mask = polygon_to_mask(poly_xy, (ysize, xsize))
-                if k in per_slice:
-                    per_slice[k] = per_slice[k] | mask
-                else:
-                    per_slice[k] = mask
+            idxs = patient_points_to_indices(contour, origin, spacing, direction)
+            k = int(np.round(np.mean(idxs[:, 2])))
+            if k < 0 or k >= zcount:
+                continue
+            poly_xy = idxs[:, :2]
+            mask = polygon_to_mask(poly_xy, (ysize, xsize))
+            if k in per_slice:
+                per_slice[k] |= mask
+            else:
+                per_slice[k] = mask
         slice_masks[roi_name] = per_slice
     return slice_masks
 
