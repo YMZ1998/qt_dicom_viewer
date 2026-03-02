@@ -1,9 +1,15 @@
 """DICOM IO utilities for series grouping and volume reading."""
 import os
 from collections import defaultdict
+from functools import lru_cache
 import numpy as np
 import pydicom
 import SimpleITK as sitk
+
+
+@lru_cache(maxsize=8192)
+def _read_dicom_header(path):
+    return pydicom.dcmread(path, stop_before_pixels=True, force=True)
 
 
 def group_dicom_series(folder):
@@ -12,7 +18,7 @@ def group_dicom_series(folder):
         for f in files:
             path = os.path.join(root, f)
             try:
-                ds = pydicom.dcmread(path, stop_before_pixels=True, force=True)
+                ds = _read_dicom_header(path)
                 sid = getattr(ds, 'SeriesInstanceUID', None)
                 if sid:
                     groups[sid].append(path)
@@ -27,7 +33,7 @@ def read_series_as_volume(file_list):
     reader = sitk.ImageSeriesReader()
     try:
         def instance_sort_key(p):
-            ds = pydicom.dcmread(p, stop_before_pixels=True, force=True)
+            ds = _read_dicom_header(p)
             ipp = getattr(ds, 'ImagePositionPatient', None)
             if ipp:
                 return float(ipp[2])
@@ -45,7 +51,7 @@ def read_series_as_volume(file_list):
 
 
 def get_rescale_from_file(path):
-    ds = pydicom.dcmread(path, stop_before_pixels=True, force=True)
+    ds = _read_dicom_header(path)
     slope = float(getattr(ds, 'RescaleSlope', 1.0))
     intercept = float(getattr(ds, 'RescaleIntercept', 0.0))
     return slope, intercept

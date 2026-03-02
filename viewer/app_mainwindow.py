@@ -383,6 +383,16 @@ class MainWindow(QMainWindow):
         self.slice_index = max(0, min(self.volume.shape[0] - 1, self.slice_index + step))
         self.slider.setValue(self.slice_index)
 
+    def _populate_roi_list(self, roi_names):
+        self.roi_list.blockSignals(True)
+        self.roi_list.clear()
+        for rname in roi_names:
+            item = QListWidgetItem(rname)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            self.roi_list.addItem(item)
+        self.roi_list.blockSignals(False)
+
     def load_rt(self):
         if self.volume is None:
             self.info_label.setText('Load a series first before loading RTSTRUCT.')
@@ -394,12 +404,7 @@ class MainWindow(QMainWindow):
             rois = parse_rtstruct(path)
             masks = contours_to_slice_masks(rois, self.origin, self.spacing, self.direction, self.volume.shape)
             self.roi_masks = masks
-            self.roi_list.clear()
-            for rname in masks.keys():
-                item = QListWidgetItem(rname)
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Checked)
-                self.roi_list.addItem(item)
+            self._populate_roi_list(masks.keys())
             self.update_viewer()
             
             # 保存RTSS信息供分割功能使用
@@ -465,12 +470,7 @@ class MainWindow(QMainWindow):
             rois = parse_rtstruct(rt_file)
             masks = contours_to_slice_masks(rois, self.origin, self.spacing, self.direction, self.volume.shape)
             self.roi_masks = masks
-            self.roi_list.clear()
-            for rname in masks.keys():
-                item = QListWidgetItem(rname)
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Checked)
-                self.roi_list.addItem(item)
+            self._populate_roi_list(masks.keys())
             self.update_viewer()
             current_text = self.info_label.text()
             rt_filename = os.path.basename(rt_file)
